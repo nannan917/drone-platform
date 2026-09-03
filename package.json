@@ -1,0 +1,19 @@
+{
+  "name": "drone-platform",
+  "version": "1.0.0",
+  "description": "无人机集群管理平台 - MAVLink 接入, AOP 架构, ARP 表驱动寻址",
+  "type": "module",
+  "main": "server/src/index.js",
+  "scripts": {
+    "start": "node server/src/index.js --sim 5 --udp 14550",
+    "sim": "node server/src/index.js --sim 5",
+    "sim-udp": "node server/src/index.js --sim 5 --udp 14550",
+    "live-udp": "node server/src/index.js --sim 0 --udp 14550"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>无人机集群管理平台</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🛸</span>
+      <h1>无人机集群管理平台</h1>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="num" id="stat-total">0</span><span class="label">集群总数</span></div>
+      <div class="stat"><span class="num online" id="stat-online">0</span><span class="label">在线</span></div>
+      <div class="stat"><span class="num flying" id="stat-flying">0</span><span class="label">任务中</span></div>
+      <div class="stat"><span class="num warn" id="stat-offline">0</span><span class="label">离线</span></div>
+    </div>
+    <div class="conn">
+      <nav class="mainnav">
+        <button class="nav-btn active" data-view="run">运行</button>
+        <button class="nav-btn" data-view="aop">空域·航路</button>
+        <button class="nav-btn" data-view="mission">任务</button>
+        <button class="nav-btn" data-view="audit">审计</button>
+      </nav>
+      <span class="dot" id="conn-dot"></span>
+      <span id="conn-text">连接中…</span>
+      <button id="btn-token" title="设置 API Token">🔑</button>
+    </div>
+  </header>
+
+  <!-- 运行视图(主界面) -->
+  <div id="wrap-run" class="view">
+    <main class="layout">
+    <!-- 左侧:无人机列表 -->
+    <aside class="panel drones-panel">
+      <div class="panel-head">
+        <h2>无人机列表</h2>
+        <button id="btn-add-drone" class="btn small" title="接入新无人机(注册到 ARP 表)">+ 接入</button>
+      </div>
+      <div id="drone-list" class="drone-list"></div>
+    </aside>
+
+    <!-- 中间:实时地图 -->
+    <section class="panel map-panel">
+      <div class="panel-head">
+        <h2>实时地图</h2>
+        <div class="map-tools">
+          <label>经度 <input id="map-center-lon" class="mini" value="113.9645" /></label>
+          <label>纬度 <input id="map-center-lat" class="mini" value="22.5935" /></label>
+          <label>缩放 <input id="map-zoom" class="mini" type="number" value="15" min="3" max="19" /></label>
+          <button id="btn-map-goto" class="btn small">跳转</button>
+          <button id="btn-map-follow" class="btn small" title="跟随选中无人机">🎯 跟随</button>
+          <select id="sel-formation" class="mini sel" title="编队队形">
+            <option value="free">自由</option>
+            <option value="triangle">三角队形</option>
+            <option value="line">一字队形</option>
+            <option value="circle">环形队形</option>
+          </select>
+          <button id="btn-formation" class="btn small" title="应用到集群">编队</button>
+        </div>
+        <div id="env-badge" class="env-badge" title="模拟环境参数">风 —</div>
+      </div>
+      <div id="map" class="map-container"></div>
+      <div class="map-legend">
+        <span><i class="sw online"></i>在线</span>
+        <span><i class="sw flying"></i>任务中</span>
+        <span><i class="sw stale"></i>弱信号</span>
+        <span><i class="sw offline"></i>离线</span>
+      </div>
+    </section>
+
+    <!-- 右侧:选中无人机详情 -->
+    <aside class="panel detail-panel">
+      <div class="panel-head"><h2>选中无人机</h2><span id="sel-id" class="sel-id">未选择</span></div>
+      <div id="detail-body" class="detail-body">
+        <div class="placeholder">在地图上点击无人机或从列表选择</div>
+      </div>
+    </aside>
+    </main>
+
+    <!-- 底部:遥测曲线 + 事件流 -->
+    <section class="bottom">
+      <div class="panel telemetry-panel">
+        <div class="panel-head">
+          <h2>实时遥测(<span id="chart-drone">-</span>)</h2>
+          <div class="chart-tabs">
+            <button class="tab active" data-metric="alt">高度</button>
+            <button class="tab" data-metric="batt">电量</button>
+            <button class="tab" data-metric="speed">速度</button>
+            <button class="tab" data-metric="hdg">航向</button>
+          </div>
+        </div>
+        <canvas id="chart-canvas" class="chart-canvas"></canvas>
+      </div>
+      <div class="panel events-panel">
+        <div class="panel-head"><h2>事件流</h2><button id="btn-clear-events" class="btn small">清空</button></div>
+        <div id="event-list" class="event-list"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 空域·航路 视图 -->
+  <section id="view-aop" class="view biz-view">
+    <div class="biz-grid">
+      <div class="panel">
+        <div class="panel-head"><h2>AOP 空域走廊</h2><button id="btn-aop-add" class="btn small">+ 新增走廊</button></div>
+        <div id="aop-list" class="resource-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>限制区 / 禁飞区</h2><button id="btn-rs-add" class="btn small">+ 新增限制区</button></div>
+        <div id="restricted-list" class="resource-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>ARP 航路规划</h2></div>
+        <div class="plan-box">
+          <label>执行无人机 <select id="arp-drone" class="mini sel"></select></label>
+          <button id="btn-plan-route" class="btn primary">生成 ARP 计划</button>
+          <div id="route-result" class="route-result">选择无人机生成包含推荐走廊/高度/时隙/风险的航路计划。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 任务 视图 -->
+  <section id="view-mission" class="view biz-view">
+    <div class="biz-head">
+      <h2>任务编排</h2>
+      <button id="btn-mission-add" class="btn primary">+ 新建任务</button>
+    </div>
+    <div class="panel">
+      <div id="mission-list" class="resource-list wide"></div>
+    </div>
+  </section>
+
+  <!-- 审计 视图 -->
+  <section id="view-audit" class="view biz-view">
+    <div class="biz-head"><h2>操作审计 <span class="subtle" id="audit-count"></span></h2><button id="btn-audit-clear" class="btn small">清空审计</button></div>
+    <div class="panel"><div id="audit-list" class="resource-list wide mono"></div></div>
+  </section>
+
+  <!-- 弹窗容器 -->
+  <div id="modal-root"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
