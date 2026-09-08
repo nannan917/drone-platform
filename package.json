@@ -5,7 +5,8 @@
   "type": "module",
   "main": "server/src/index.js",
   "scripts": {
-    "start": "node server/src/index.js --sim 5 --udp 14550",
+    "test": "node --test server/test/*.test.js",
+    "start": "node server/src/index.js --sim 0 --udp 14550",
     "sim": "node server/src/index.js --sim 5",
     "sim-udp": "node server/src/index.js --sim 5 --udp 14550",
     "live-udp": "node server/src/index.js --sim 0 --udp 14550"

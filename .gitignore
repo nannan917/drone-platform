@@ -8,7 +8,14 @@ server-err.log
 .pid
 
 # 运行数据(用户可保留但通常不入库)
-server/data/operations.json
+server/data/
+*登录说明*.txt
+bootstrap-admin.txt
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 
 # 前端地图截图等临时产物
 shot*.png

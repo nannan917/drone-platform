@@ -422,10 +422,10 @@ export class DroneSimulator {
     const baseMode = (sim.armed ? 128 : 0) | (['GUIDED', 'AUTO', 'RTL', 'LAND'].includes(sim.mode) ? 8 : 0);
     const custom = sim.mode === 'GUIDED' ? 4 : sim.mode === 'RTL' ? 6 : sim.mode === 'LAND' ? 9 : 0;
     const payload = Buffer.alloc(9);
-    payload[0] = 2; // QUADROTOR
-    payload[1] = 3; // ARDUPILOTMEGA
-    payload[2] = baseMode;
-    payload.writeUInt32LE(custom, 3);
+    payload.writeUInt32LE(custom, 0);
+    payload[4] = 2; // QUADROTOR
+    payload[5] = 3; // ARDUPILOTMEGA
+    payload[6] = baseMode;
     payload[7] = sim.state === 'idle' && !sim.armed ? 3 : 4; // STANDBY / ACTIVE
     payload[8] = 3;
     this.gateway.receive(this._frame(0, payload, sim.sysid), { transport: 'sim', host: '127.0.0.1', port: 0, streamState: this._streamState(sim.sysid) });
@@ -453,14 +453,14 @@ export class DroneSimulator {
     const lonN = sim.lon + sim.noise.lon() * noiseM * DEG_PER_M / Math.cos(this.originLat * CR);
     const altN = sim.alt + sim.noise.alt() * 1.2;
     const payload = Buffer.alloc(30);
-    payload.writeUInt8(3, 8); // 3D fix
-    payload.writeInt32LE(Math.round(latN * 1e7), 9);
-    payload.writeInt32LE(Math.round(lonN * 1e7), 13);
-    payload.writeInt32LE(Math.round(altN * 1000), 17);
-    payload.writeUInt16LE(Math.round(sim.eph), 21);
-    payload.writeUInt16LE(Math.round(sim.eph * 1.4), 23);
-    payload.writeUInt16LE(Math.round(sim.speed * 100), 25);
-    payload.writeUInt16LE(Math.round(sim.heading * 100), 27);
+    payload.writeUInt8(3, 28); // 3D fix
+    payload.writeInt32LE(Math.round(latN * 1e7), 8);
+    payload.writeInt32LE(Math.round(lonN * 1e7), 12);
+    payload.writeInt32LE(Math.round(altN * 1000), 16);
+    payload.writeUInt16LE(Math.round(sim.eph), 20);
+    payload.writeUInt16LE(Math.round(sim.eph * 1.4), 22);
+    payload.writeUInt16LE(Math.round(sim.speed * 100), 24);
+    payload.writeUInt16LE(Math.round(sim.heading * 100), 26);
     // 卫星数波动
     if (sim.tick % 37 === 0) sim.sat = Math.max(9, Math.min(18, sim.sat + (Math.random() > 0.5 ? 1 : -1)));
     payload.writeUInt8(sim.sat, 29);
@@ -476,31 +476,17 @@ export class DroneSimulator {
     sim.batt = Math.max(0, sim.batt - (rate / 60) * (this.tickMs / 1000));
     // 电压:3S LiPo,与电量非线性
     const cellV = 4.2 - (100 - sim.batt) * 0.012;
-    const voltage = cellV * 3;
-    const payload = Buffer.alloc(38);
-    payload.writeUInt8(0, 0);
-    payload.writeUInt8(0, 1);
-    payload.writeUInt8(1, 2); // LiPo
-    payload.writeInt16LE(2800 + Math.round(sim.noise.att() * 200), 3); // 温度波动
-    payload.writeUInt16LE(Math.round(cellV * 100), 5);
-    payload.writeUInt16LE(0xffff, 7);
-    payload.writeUInt16LE(0xffff, 9);
-    payload.writeUInt16LE(0xffff, 11);
-    payload.writeUInt16LE(0xffff, 13);
-    payload.writeUInt16LE(0xffff, 15);
-    payload.writeUInt16LE(0xffff, 17);
-    payload.writeUInt16LE(0xffff, 19);
-    payload.writeUInt16LE(0xffff, 21);
-    payload.writeUInt16LE(0xffff, 23);
+    const payload = Buffer.alloc(41);
+    payload.writeInt32LE(Math.round(sim.flightTime * 12), 0);
+    payload.writeInt32LE(-1, 4);
+    payload.writeInt16LE(2800 + Math.round(sim.noise.att() * 200), 8);
+    for(let i=0;i<10;i++)payload.writeUInt16LE(i<3?Math.round(cellV*1000):65535,10+i*2);
     const current = sim.state === 'flying' ? 18 : sim.state === 'takeoff' ? 30 : sim.state === 'hover' ? 12 : 2;
-    payload.writeInt16LE(Math.round(current * 100), 25);
-    payload.writeInt32LE(Math.round(sim.flightTime * current), 27); // consumed mAh
-    payload.writeInt32LE(0, 31);
-    payload.writeInt8(Math.round(sim.batt), 35);
-    // 剩余时间(秒),int8 上限 127;更长填 -1(未知),与真实飞控一致
-    const remainSec = Math.round((sim.batt / rate) * 60);
-    payload.writeInt8(remainSec > 127 ? -1 : remainSec, 36);
-    payload.writeUInt8(1, 37);
+    payload.writeInt16LE(Math.round(current*100),30);
+    payload[32]=0;payload[33]=1;payload[34]=3;
+    payload.writeInt8(Math.round(sim.batt),35);
+    payload.writeInt32LE(Math.round((sim.batt/rate)*60),36);
+    payload[40]=1;
     this.gateway.receive(this._frame(147, payload, sim.sysid), { transport: 'sim', streamState: this._streamState(sim.sysid) });
   }
 
@@ -510,16 +496,11 @@ export class DroneSimulator {
     payload.writeUInt32LE(0xffffffff, 4);
     payload.writeUInt32LE(0xffffffff, 8);
     const load = sim.state === 'idle' ? 12 : sim.state === 'flying' ? 45 : sim.state === 'takeoff' ? 70 : 30;
-    payload.writeUInt16LE(load + Math.round(sim.noise.att() * 4), 12);
+    payload.writeUInt16LE(load * 10 + Math.round(sim.noise.att() * 4), 12);
     payload.writeUInt16LE(Math.round((4.2 - (100 - sim.batt) * 0.012) * 3 * 1000), 14); // mV
     payload.writeInt16LE(sim.state === 'idle' ? 200 : 1200, 16); // cA
-    payload.writeInt8(Math.round(sim.batt), 18);
-    payload.writeUInt16LE(0, 19);
-    payload.writeUInt16LE(sim.tick % 40 === 0 ? 1 : 0, 21); // 偶发通信错误
-    payload.writeUInt16LE(0, 23);
-    payload.writeUInt16LE(0, 25);
-    payload.writeUInt16LE(0, 27);
-    payload.writeUInt16LE(0, 29);
+    payload.writeInt8(Math.round(sim.batt), 30);
+    payload.writeUInt16LE(sim.tick % 40 === 0 ? 1 : 0, 20); // 偶发通信错误
     this.gateway.receive(this._frame(1, payload, sim.sysid), { transport: 'sim', streamState: this._streamState(sim.sysid) });
   }
 

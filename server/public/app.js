@@ -1,8 +1,10 @@
 /* app.js — 无人机集群管理平台前端 */
+import { forgetDrone, replaceSnapshot, applyPresence } from './device-state.js';
+import { currentPosition, positionLabel, gpsFixLabel, validMapCoordinates } from './position-ui.js';
 (() => {
   'use strict';
 
-  const API_TOKEN = localStorage.getItem('drone_api_token') || 'dsh-demo-token';
+  const API_TOKEN = ''; // Account cookie authenticates all requests.
   const API = (path, opts = {}) => {
     const headers = { 'X-API-Token': API_TOKEN, ...(opts.headers || {}) };
     return fetch(`/api${path}`, { ...opts, headers }).then(async (r) => {
@@ -67,8 +69,7 @@
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'snapshot') {
-        for (const d of msg.data.drones) upsertDrone(d);
-        for (const a of msg.data.arp || []) state.arp.set(a.droneId, a);
+        replaceSnapshot(state, history, msg.data, upsertDrone);
         renderAll();
       } else if (msg.type === 'state') {
         upsertDrone(msg.data);
@@ -98,18 +99,14 @@
     };
     const [cls, text] = map[p.reason] || ['presence', `${p.droneId} ${p.reason}`];
     addEvent(cls, text);
-    // 离线/过期时清掉状态显示
-    if (p.reason === 'offline' || p.reason === 'expire') {
-      const d = state.drones.get(p.droneId);
-      if (d) { d.online = false; }
-      if (p.reason === 'expire') state.drones.delete(p.droneId);
-      renderAll();
-    }
+    applyPresence(state, history, p);
+    renderAll();
   }
 
   function upsertDrone(d) {
     const prev = state.drones.get(d.droneId);
     state.drones.set(d.droneId, { ...(prev || {}), ...d });
+    if (!state.selected) state.selected = d.droneId;
     // 遥测历史采样(含经纬度,供轨迹绘制)
     if (d.position || d.battery || d.gps) {
       const h = history.get(d.droneId) || [];
@@ -165,7 +162,7 @@
     }
     el.droneList.innerHTML = list.map((d) => {
       const cls = droneClass(d);
-      const pos = d.position;
+      const pos = currentPosition(d);
       const batt = d.battery;
       return `
       <div class="drone-card ${cls} ${d.droneId === state.selected ? 'selected' : ''}" data-id="${d.droneId}">
@@ -180,8 +177,8 @@
         </div>
         <div class="row3">
           <span><span class="k">位置</span> <span class="v">${pos ? pos.lat.toFixed(5) + ', ' + pos.lon.toFixed(5) : '—'}</span></span>
-          <span><span class="k">高</span> <span class="v">${pos ? pos.relAlt?.toFixed(1) + 'm' : '—'}</span></span>
-          <span><span class="k">电</span> <span class="v">${batt ? batt.remaining + '%' : '—'}</span></span>
+          <span><span class="k">高</span> <span class="v">${pos && (pos.relAlt ?? pos.alt) != null ? (pos.relAlt ?? pos.alt).toFixed(1) + 'm' : '—'}</span></span>
+          <span><span class="k">电</span> <span class="v">${batt?.remaining != null ? batt.remaining + '%' : '—'}</span></span>
         </div>
       </div>`;
     }).join('');
@@ -189,16 +186,18 @@
       card.onclick = () => { state.selected = card.dataset.id; renderAll(); };
     });
     el.droneList.querySelectorAll('.del-drone').forEach((btn) => {
+      if(!window.platformUser?.permissions.includes('control')){btn.remove();return;}
       btn.onclick = (ev) => {
         ev.stopPropagation();
         const id = btn.dataset.id;
         openModal(`
           <h3>删除无人机</h3>
-          <p style="color:var(--muted);font-size:13px">确定要从集群删除 <b>${id}</b> 吗?将停止其模拟遥测并从 ARP 注册表移除。</p>
+          <p style="color:var(--muted);font-size:13px">确定要从集群删除 <b>${id}</b> 吗？模拟机将停止遥测；真实设备将在本次服务运行期间忽略，重启服务后可重新接入。</p>
           <div class="modal-actions"><button class="btn" onclick="window.__closeModal()">取消</button><button class="btn danger" id="del-ok">确认删除</button></div>`);
         $('del-ok').onclick = async () => {
           try {
             await API(`/drones/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            forgetDrone(state, history, id);
             window.__closeModal(); toast(`已删除 ${id}`);
             if (state.selected === id) state.selected = null;
             renderAll();
@@ -216,7 +215,7 @@
       return;
     }
     el.selId.textContent = d.droneId;
-    const pos = d.position;
+    const pos = currentPosition(d);
     const batt = d.battery;
     const att = d.attitude;
     const gps = d.gps;
@@ -230,13 +229,16 @@
         ${i('机型', d.vehicleType || '—', 'small')}
         ${i('飞控', d.autopilot || '—', 'small')}
         ${i('链路', d.transport || '—', 'small')}
+        ${i('定位状态', positionLabel(d), 'small')}
+        ${i('GPS 定位', gpsFixLabel(gps), 'small')}
+        ${i('GPS 设备', d.gpsSensor ? (d.gpsSensor.present ? (d.gpsSensor.healthy ? '飞控报告正常' : '已检测，尚未就绪') : '飞控未报告 GPS 设备') : '状态未知', 'small')}
         ${i('纬度', pos ? pos.lat.toFixed(6) : '—', 'small')}
         ${i('经度', pos ? pos.lon.toFixed(6) : '—', 'small')}
-        ${i('高度(相对)', pos ? (pos.relAlt ?? pos.alt)?.toFixed(1) + ' m' : '—')}
-        ${i('航向', pos ? Math.round(pos.heading ?? 0) + '°' : '—')}
-        ${i('电量', batt ? batt.remaining + '% (' + (batt.voltage ? batt.voltage.toFixed(2) + 'V' : '?') + ')' : '—', batt && batt.remaining < 25 ? 'warn' : '')}
-        ${i('速度', gps ? gps.groundSpeed?.toFixed(1) + ' m/s' : '—', 'small')}
-        ${i('卫星', gps ? gps.satellitesVisible : '—', 'small')}
+        ${i(pos?.relAlt != null ? '相对高度' : '海拔高度', pos && (pos.relAlt ?? pos.alt) != null ? (pos.relAlt ?? pos.alt).toFixed(1) + ' m' : '—')}
+        ${i('航向', pos?.heading != null ? Math.round(pos.heading) + '°' : '—')}
+        ${i('电量', batt ? (batt.remaining == null ? '未知' : batt.remaining + '%') + ' / ' + (batt.voltage == null ? '电压未知' : batt.voltage.toFixed(2) + 'V') : '—', batt?.remaining != null && batt.remaining < 25 ? 'warn' : '')}
+        ${i('速度', gps?.groundSpeed != null ? gps.groundSpeed.toFixed(1) + ' m/s' : '—', 'small')}
+        ${i('卫星', gps?.satellitesVisible ?? '未知', 'small')}
         ${i('姿态', att ? `R${att.roll.toFixed(0)}° P${att.pitch.toFixed(0)}° Y${att.yaw.toFixed(0)}°` : '—', 'small')}
         ${i('系统负载', sys ? sys.load + '%' : '—', 'small')}
         ${i('收包数', d.packets ?? 0, 'small')}
@@ -255,6 +257,10 @@
         <button class="btn primary" data-cmd="goto">🚀 前往</button>
       </div>
     `;
+    if(d.droneId.startsWith('real-')||!window.platformUser?.permissions.includes('control')){
+      el.detailBody.querySelector('.actions').innerHTML='<p class="position-status">当前接入为遥测查看；飞行操作请在 QGC 中进行。</p>';
+      el.detailBody.querySelector('.goto-row').remove();
+    }
     el.detailBody.querySelectorAll('[data-cmd]').forEach((btn) => {
       btn.onclick = () => sendCommand(btn.dataset.cmd);
     });
@@ -278,13 +284,24 @@
   }
 
   // ————— 实时地图(Leaflet)—————
-  const MAP = { originLat: 22.5935, originLon: 113.9645, zoom: 15 };
+  // Start with a world overview, never a pretend local/aircraft position.
+  const MAP = { originLat: 20, originLon: 0, zoom: 2 };
   let map = null;
   /** @type {Map<string, L.Marker>} */
   const markers = new Map();
   /** @type {Map<string, L.Polyline>} 轨迹线 */
   const trails = new Map();
-  let followMode = false;
+  let followMode = true;
+  let centeredOnDrone = false;
+  let mapSource = 'overview';
+  let computerMarker = null;
+  let computerAccuracy = null;
+
+  function setFollow(enabled) {
+    followMode = enabled;
+    $('btn-map-follow').textContent = enabled ? '跟随飞控：开' : '跟随飞控：关';
+    $('btn-map-follow').setAttribute('aria-pressed', String(enabled));
+  }
 
   function initMap() {
     if (map) return;
@@ -315,6 +332,15 @@
       { position: 'topright' }
     ).addTo(map);
     map.on('click', () => { state.selected = null; renderAll(); });
+    map.on('dragstart', () => { setFollow(false); mapSource = 'manual'; });
+    map.on('moveend', () => {
+      if (mapSource === 'overview') return;
+      const center = map.getCenter();
+      el.mapCenterLat.value = center.lat.toFixed(6);
+      el.mapCenterLon.value = center.lng.toFixed(6);
+      el.mapZoom.value = map.getZoom();
+    });
+    setFollow(true);
     // 缩放控件深色化
     setTimeout(() => {
       document.querySelectorAll('.leaflet-control-zoom a').forEach((a) => {
@@ -331,7 +357,7 @@
       <div class="drone-marker ${cls} ${d.droneId === state.selected ? 'selected' : ''}" style="color:${colorOf(cls)}">
         <span class="nose" style="transform:rotate(${hdg}deg)"></span>
         <span class="ring"><span class="dot"></span></span>
-        <span class="lbl">${d.droneId}${d.position ? ' ' + (d.position.relAlt ?? d.position.alt)?.toFixed(0) + 'm' : ''}</span>
+        <span class="lbl">${d.droneId}${(d.position?.relAlt ?? d.position?.alt) != null ? ' ' + (d.position.relAlt ?? d.position.alt).toFixed(0) + 'm' : ''}</span>
       </div>`;
   }
 
@@ -341,11 +367,14 @@
 
   function renderMap() {
     if (!map) return;
+    const selected = state.drones.get(state.selected);
+    const viewLabel = ({ overview: '世界概览', computer: '地图中心：电脑位置', manual: '手动浏览', vehicle: '地图中心：飞控位置' })[mapSource];
+    $('map-position-status').textContent = `${viewLabel} · ${selected ? selected.droneId + '：' : ''}${positionLabel(selected)}`;
     const dpr = window.devicePixelRatio || 1;
     for (const d of state.drones.values()) {
       const cls = droneClass(d);
       let m = markers.get(d.droneId);
-      if (!d.position) {
+      if (!currentPosition(d)) {
         if (m) { map.removeLayer(m); markers.delete(d.droneId); }
         continue;
       }
@@ -367,12 +396,16 @@
         m.setIcon(L.divIcon({ className: '', html: droneMarkerHtml(d, cls), iconSize: [34, 34], iconAnchor: [17, 17] }));
       }
       if (followMode && d.droneId === state.selected) {
-        map.panTo(ll, { animate: true });
+        mapSource = 'vehicle';
+        if (!centeredOnDrone) {
+          map.setView(ll, 16);
+          centeredOnDrone = true;
+        } else map.panTo(ll, { animate: false });
       }
     }
     // 移除已消失的标记
     for (const id of [...markers.keys()]) {
-      if (!state.drones.has(id)) {
+      if (!state.drones.has(id) || !currentPosition(state.drones.get(id))) {
         map.removeLayer(markers.get(id));
         markers.delete(id);
       }
@@ -380,7 +413,7 @@
     // 轨迹线
     for (const [id, d] of state.drones) {
       const h = history.get(id);
-      if (!d.position || !h || h.length < 2) continue;
+      if (!currentPosition(d) || !h || h.length < 2) continue;
       const pts = h.filter((s) => s.lat !== null && s.lon !== null).map((s) => [s.lat, s.lon]);
       if (pts.length < 2) continue;
       let tr = trails.get(id);
@@ -397,7 +430,7 @@
       }
     }
     for (const id of [...trails.keys()]) {
-      if (!state.drones.has(id)) {
+      if (!state.drones.has(id) || !currentPosition(state.drones.get(id))) {
         map.removeLayer(trails.get(id));
         trails.delete(id);
       }
@@ -503,20 +536,47 @@
       if (t !== null) { localStorage.setItem('drone_api_token', t || 'dsh-demo-token'); location.reload(); }
     };
     $('btn-map-goto').onclick = () => {
-      MAP.originLon = parseFloat(el.mapCenterLon.value) || MAP.originLon;
-      MAP.originLat = parseFloat(el.mapCenterLat.value) || MAP.originLat;
-      MAP.zoom = Math.min(19, Math.max(3, parseInt(el.mapZoom.value) || 15));
+      const lon = parseFloat(el.mapCenterLon.value), lat = parseFloat(el.mapCenterLat.value);
+      if (!validMapCoordinates(lat, lon)) return toast('请输入有效经纬度：纬度 -90～90，经度 -180～180', true);
+      MAP.originLon = lon;
+      MAP.originLat = lat;
+      MAP.zoom = Math.min(19, Math.max(2, parseInt(el.mapZoom.value) || 15));
+      setFollow(false);
+      mapSource = 'manual';
       if (map) map.setView([MAP.originLat, MAP.originLon], MAP.zoom);
     };
     $('btn-map-follow').onclick = () => {
-      followMode = !followMode;
-      $('btn-map-follow').style.borderColor = followMode ? 'var(--accent)' : '';
-      $('btn-map-follow').style.color = followMode ? 'var(--accent)' : '';
-      if (followMode && state.selected) {
-        const d = state.drones.get(state.selected);
-        if (d?.position && map) map.panTo([d.position.lat, d.position.lon]);
-      }
-      toast(followMode ? '已开启跟随选中无人机' : '已关闭跟随');
+      setFollow(!followMode);
+      centeredOnDrone = false;
+      renderMap();
+      toast(followMode ? '已开启跟随，有效定位后自动移到飞控' : '已关闭跟随');
+    };
+    $('btn-map-me').onclick = () => {
+      if (!navigator.geolocation) return toast('浏览器不支持定位，请手动输入经纬度', true);
+      const button = $('btn-map-me');
+      button.disabled = true;
+      button.textContent = '正在定位…';
+      const reset = () => { button.disabled = false; button.textContent = '定位我的电脑'; };
+      navigator.geolocation.getCurrentPosition(({ coords }) => {
+        reset();
+        if (!validMapCoordinates(coords.latitude, coords.longitude)) return toast('浏览器未返回有效坐标', true);
+        setFollow(false);
+        mapSource = 'computer';
+        const ll = [coords.latitude, coords.longitude];
+        if (computerMarker) map.removeLayer(computerMarker);
+        if (computerAccuracy) map.removeLayer(computerAccuracy);
+        computerMarker = L.circleMarker(ll, { radius: 7, color: '#60a5fa', fillOpacity: 1 })
+          .bindTooltip('电脑位置（浏览器定位）').addTo(map);
+        if (Number.isFinite(coords.accuracy) && coords.accuracy > 0) {
+          computerAccuracy = L.circle(ll, { radius: coords.accuracy, color: '#60a5fa', weight: 1, fillOpacity: 0.08 }).addTo(map);
+        }
+        map.setView(ll, 15);
+        renderMap();
+        toast('已定位电脑。无人机标记仍以飞控坐标为准。');
+      }, (error) => {
+        reset();
+        toast(error.code === 1 ? '定位权限未开启，可允许浏览器定位或手动输入经纬度' : '电脑定位暂不可用，请手动输入经纬度', true);
+      }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
     };
     $('btn-formation').onclick = async () => {
       const type = $('sel-formation').value;
@@ -538,6 +598,12 @@
     initViews();
     bindBizButtons();
     loadBiz();
+    window.addEventListener('management-changed',loadManagedMap);
+    setInterval(loadManagedMap,15000);
+    setInterval(()=>API('/drones').then(data=>{replaceSnapshot(state,history,data,upsertDrone);renderAll();}).catch(()=>{state.drones.clear();state.arp.clear();history.clear();renderAll();}),15000);
+    window.addEventListener('resize',()=>{if(map)setTimeout(()=>map.invalidateSize(),50);});
+    $('sel-formation').hidden=true;$('btn-formation').hidden=true;
+    if(window.platformUser?.orgId!=='hq')$('btn-add-drone').hidden=true;
 
     // 环境信息
     loadEnvironment();
@@ -545,8 +611,7 @@
 
     // 初始拉取 + WS
     API('/drones').then((data) => {
-      for (const d of data.drones) upsertDrone(d);
-      for (const a of data.arp || []) state.arp.set(a.droneId, a);
+        replaceSnapshot(state, history, data, upsertDrone);
       // 若无选中,默认选第一架在线无人机,使实时遥测曲线立即可见
       if (!state.selected) {
         const first = [...state.drones.values()].sort((x, y) => x.droneId.localeCompare(y.droneId))[0];
@@ -654,6 +719,7 @@
     }
   }
   async function loadBiz() {
+    if(window.platformUser)return loadManagedMap();
     try {
       const air = await API('/airspace');
       biz.airspace = air;
@@ -669,6 +735,26 @@
     } catch (e) {
       /* 忽略 */
     }
+  }
+
+
+  let managedLayer=null;
+  async function loadManagedMap(){
+    if(!map)return;
+    try{
+      const [assets,fences]=await Promise.all([API('/v2/assets'),API('/v2/fences')]);
+      if(managedLayer)map.removeLayer(managedLayer);
+      managedLayer=L.layerGroup().addTo(map);
+      for(const asset of assets){
+        if(asset.kind!=='自动机场'||asset.lat==null||asset.lon==null||!validMapCoordinates(asset.lat,asset.lon))continue;
+        const label=document.createElement('span');label.textContent=asset.name+' · '+asset.status+' · 实时状态待机场接口';
+        L.marker([asset.lat,asset.lon],{icon:L.divIcon({className:'dock-marker',html:'机场',iconSize:[38,25]})}).bindTooltip(label).addTo(managedLayer);
+      }
+      for(const fence of fences.filter(f=>f.enabled!==false)){
+        const label=document.createElement('span');label.textContent=fence.name+' · '+fence.kind+(fence.kind==='限飞区'?' '+fence.ceiling+'m':'');
+        L.geoJSON(fence.geometry,{style:{color:fence.kind==='禁飞区'?'#f87171':'#fbbf24',weight:2,fillOpacity:.12}}).bindTooltip(label).addTo(managedLayer);
+      }
+    }catch{/* Keep the live telemetry map usable if business data is unavailable. */}
   }
 
   function populateArpDroneSelect() {
@@ -919,5 +1005,5 @@
     });
   }
 
-  document.addEventListener('DOMContentLoaded', init);
+  window.addEventListener('platform-authenticated', init, {once:true});
 })();

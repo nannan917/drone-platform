@@ -26,7 +26,10 @@ try { pkg = require('../../package.json'); } catch { /* SEA 下 package.json 已
 function parseArgs(argv) {
   const opts = { sim: 0, udp: null, port: 4000, token: null, origin: null };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--sim') opts.sim = Number(argv[i + 1]) || 3;
+    if (argv[i] === '--sim') {
+      const count = Number(argv[i + 1]);
+      opts.sim = Number.isInteger(count) && count >= 0 ? count : 3;
+    }
     if (argv[i] === '--udp') opts.udp = Number(argv[i + 1]) || 14550;
     if (argv[i] === '--port') opts.port = Number(argv[i + 1]) || 4000;
     if (argv[i] === '--token') opts.token = argv[i + 1];

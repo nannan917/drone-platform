@@ -3,15 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>无人机集群管理平台</title>
+  <title>深圳总站无人机应用管理平台</title>
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/management.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="logo">🛸</span>
-      <h1>无人机集群管理平台</h1>
+      <h1>深圳总站无人机应用管理平台</h1>
     </div>
     <div class="stats">
       <div class="stat"><span class="num" id="stat-total">0</span><span class="label">集群总数</span></div>
@@ -49,11 +50,12 @@
       <div class="panel-head">
         <h2>实时地图</h2>
         <div class="map-tools">
-          <label>经度 <input id="map-center-lon" class="mini" value="113.9645" /></label>
-          <label>纬度 <input id="map-center-lat" class="mini" value="22.5935" /></label>
-          <label>缩放 <input id="map-zoom" class="mini" type="number" value="15" min="3" max="19" /></label>
+          <label>经度 <input id="map-center-lon" class="mini" placeholder="未定位" /></label>
+          <label>纬度 <input id="map-center-lat" class="mini" placeholder="未定位" /></label>
+          <label>缩放 <input id="map-zoom" class="mini" type="number" value="2" min="2" max="19" /></label>
           <button id="btn-map-goto" class="btn small">跳转</button>
           <button id="btn-map-follow" class="btn small" title="跟随选中无人机">🎯 跟随</button>
+          <button id="btn-map-me" class="btn small" title="通过浏览器定位电脑，不替代飞控位置">定位我的电脑</button>
           <select id="sel-formation" class="mini sel" title="编队队形">
             <option value="free">自由</option>
             <option value="triangle">三角队形</option>
@@ -62,8 +64,9 @@
           </select>
           <button id="btn-formation" class="btn small" title="应用到集群">编队</button>
         </div>
-        <div id="env-badge" class="env-badge" title="模拟环境参数">风 —</div>
+        <div id="env-badge" class="env-badge" title="气象服务尚未接入">气象待接入</div>
       </div>
+      <div id="map-position-status" class="position-status" role="status">世界概览 · 等待飞控定位</div>
       <div id="map" class="map-container"></div>
       <div class="map-legend">
         <span><i class="sw online"></i>在线</span>
@@ -147,6 +150,7 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/vendor/leaflet/leaflet.js"></script>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
+  <script type="module" src="/management-ui.js"></script>
 </body>
 </html>

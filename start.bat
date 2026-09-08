@@ -13,7 +13,7 @@ if not exist "%~dp0node_modules\ws" (
   )
 )
 
-powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 4000 -State Listen -ErrorAction SilentlyContinue; if ($c) { exit 0 } else { exit 1 }" >nul 2>&1
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:4000/api/health' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
 if %errorlevel% equ 0 (
   echo [info] already running at http://127.0.0.1:4000
   start "" "http://127.0.0.1:4000"
@@ -21,7 +21,7 @@ if %errorlevel% equ 0 (
 )
 
 echo [start] launching service in background...
-start "" /b "D:\node.exe" "%~dp0server\src\index.js" --sim 5 --udp 14550 --port 4000 2>nul
+powershell -NoProfile -Command "Start-Process -FilePath 'D:\node.exe' -ArgumentList 'server/src/index.js --sim 0 --udp 14550 --port 4000' -WorkingDirectory '%~dp0' -WindowStyle Hidden -RedirectStandardOutput '%~dp0server.log' -RedirectStandardError '%~dp0server-err.log'"
 
 echo [wait] waiting for service...
 set /a tries=0
@@ -42,6 +42,6 @@ exit /b 1
 echo [OK] platform ready at http://127.0.0.1:4000
 start "" "http://127.0.0.1:4000"
 echo project dir: %~dp0
-echo stop service: taskkill /f /im node.exe
+echo stop service: close only this platform process
 timeout /t 4 /nobreak >nul
 exit /b 0

@@ -9,7 +9,8 @@
  *  - 将状态变化推送给订阅者(WebSocket 层)
  */
 
-import { feed, encodeV2Frame, MAV_CMD } from './mavlink.js';
+import { feed, encodeV2Frame, MAV_CMD, isVehicleHeartbeat } from './mavlink.js';
+import { resolvePosition } from './position.js';
 
 export class MavlinkGateway {
   /**
@@ -22,6 +23,9 @@ export class MavlinkGateway {
     this.logger = opts.logger ?? console;
     /** @type {Map<string, object>} droneId → 实时状态 */
     this.states = new Map();
+    // Explicitly deleted external vehicles stay hidden until the service restarts.
+    this._removedExternalIds = new Set();
+    this.positionDiagnostics = { received: {}, decoded: {}, rejected: {} };
     /** 序列号(指令帧用) */
     this._seq = 0;
     /** 传输后端:transportName → { send(frameBuffer, entry) } */
@@ -66,10 +70,8 @@ export class MavlinkGateway {
    */
   receive(chunk, meta = {}) {
     const state = meta.streamState ?? (this._streamState ??= { buffer: Buffer.alloc(0) });
-    const frames = feed(chunk, state);
-    for (const frame of frames) {
-      this.ingest(frame, meta);
-    }
+    const frames = feed(chunk, state, this.positionDiagnostics);
+    return Promise.all(frames.map((frame) => this.ingest(frame, meta)));
   }
 
   _ingest(frame, meta) {
@@ -78,6 +80,19 @@ export class MavlinkGateway {
     const t = meta.transport ?? 'unknown';
     const prefix = t === 'sim' ? 'uav' : 'real';
     const droneId = `${prefix}-${frame.sysid}`;
+    if (this._removedExternalIds.has(droneId)) return null;
+    const existing = this.states.get(droneId);
+    if (frame.msgid === 0) {
+      if (!isVehicleHeartbeat(frame)) {
+        // Remove a legacy misclassification only for its own component.
+        if (existing?.entry.compid === frame.compid) this.removeDrone(droneId, { suppress: false });
+        return null;
+      }
+    } else if (!existing) {
+      // Telemetry, GCS traffic and companion messages cannot register a vehicle.
+      return null;
+    }
+    if (existing && existing.entry.compid !== frame.compid) return null;
     const entry = this.arp.learn(droneId, {
       transport: t,
       host: meta.host ?? null,
@@ -120,6 +135,7 @@ export class MavlinkGateway {
       st._lastEmit = now;
       this._emit('state', this._publicState(droneId));
     }
+    return droneId;
   }
 
   _initState(droneId, entry) {
@@ -145,18 +161,22 @@ export class MavlinkGateway {
     return {
       droneId: st.droneId,
       online: st.online,
+      armed: !!(st.heartbeat?.baseMode & 128),
       mode: st.mode ?? 'N/A',
       vehicleType: st.vehicleType ?? 'unknown',
       autopilot: st.autopilot ?? 'unknown',
-      position: st.globalPosition
-        ? { lat: st.globalPosition.lat, lon: st.globalPosition.lon, alt: st.globalPosition.alt, relAlt: st.globalPosition.relativeAlt, heading: st.globalPosition.heading }
-        : (st.gps ? { lat: st.gps.lat, lon: st.gps.lon, alt: st.gps.alt, heading: st.attitude?.yaw ?? 0 } : null),
+      ...resolvePosition(st),
       attitude: st.attitude ? { roll: st.attitude.roll, pitch: st.attitude.pitch, yaw: st.attitude.yaw } : null,
       battery: st.battery
-        ? { voltage: st.battery.voltages?.[0] ?? null, remaining: st.battery.batteryRemaining, current: st.battery.currentBattery }
+        ? { voltage: st.battery.voltage ?? null, remaining: st.battery.batteryRemaining, current: st.battery.currentBattery }
         : (st.sysStatus ? { voltage: st.sysStatus.voltageBattery, remaining: st.sysStatus.batteryRemaining, current: st.sysStatus.currentBattery } : null),
       sysStatus: st.sysStatus ? { load: st.sysStatus.load, voltageBattery: st.sysStatus.voltageBattery, batteryRemaining: st.sysStatus.batteryRemaining } : null,
-      gps: st.gps ? { fixType: st.gps.fixType, satellitesVisible: st.gps.satellitesVisible, groundSpeed: st.gps.groundSpeed } : null,
+      gps: st.gps ? { fixType: st.gps.fixType, satellitesVisible: st.gps.satellitesVisible, groundSpeed: st.gps.groundSpeed, at: st.gps.at } : null,
+      gpsSensor: st.sysStatus ? {
+        present: !!(st.sysStatus.sensorsPresent & 32),
+        enabled: !!(st.sysStatus.sensorsEnabled & 32),
+        healthy: !!(st.sysStatus.sensorsHealth & 32),
+      } : null,
       packets: st.packets,
       telemetryCount: st.telemetryCount,
       lastSeen: st.lastSeen,
@@ -180,7 +200,8 @@ export class MavlinkGateway {
    * 从网关移除一架无人机的全部状态(实时状态、ARP 条目),并广播下线事件。
    * 注意:不负责停止模拟器遥测——模拟机需由 ApiServer 先调用 simulator.removeDrone。
    */
-  removeDrone(droneId) {
+  removeDrone(droneId, { suppress = true } = {}) {
+    if (suppress && droneId.startsWith('real-')) this._removedExternalIds.add(droneId);
     const removed = this.states.delete(droneId);
     let arpRemoved = false;
     if (this.arp.remove) arpRemoved = this.arp.remove(droneId);

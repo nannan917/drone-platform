@@ -16,13 +16,15 @@
 
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, sep } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { WebSocketServer } from 'ws';
 import { Aop, authAspect, loggingAspect } from './aop.js';
 import { ArpTable } from './arp.js';
 import { MavlinkGateway } from './gateway.js';
 import { Operations } from './operations.js';
+import { Management } from './management.js';
+import { managementRoute, sessionToken, sameOrigin } from './management-http.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -44,11 +46,14 @@ export class ApiServer {
     this.apiToken = opts.apiToken ?? process.env.DRONE_API_TOKEN ?? 'dsh-demo-token';
     this.logger = opts.logger ?? console;
     this.simulator = opts.simulator ?? null;
+    this.management = new Management({ dataDir: opts.dataDir });
+    // Explicit API tokens remain available for controlled integrations/tests; the old public demo token is not an account.
+    this.integrationToken = opts.apiToken && opts.apiToken !== 'dsh-demo-token' ? opts.apiToken : null;
 
     // —— AOP 容器 ——
     this.aop = new Aop();
     this.aop.logger = this.logger;
-    this.aop.aspect('*', loggingAspect(this.logger));
+    if(process.env.DRONE_VERBOSE_TELEMETRY==='1')this.aop.aspect('*', loggingAspect(this.logger));
 
     // —— ARP 表(带状态变更回调推 WS)——
     this.arp = new ArpTable({
@@ -60,7 +65,10 @@ export class ApiServer {
 
     // —— 网关 ——
     this.gateway = new MavlinkGateway(this.arp, this.aop, { logger: this.logger });
-    this.gateway.subscribe((evt, payload) => this._broadcast({ type: evt, data: payload }));
+    this.gateway.subscribe((evt, payload) => {
+      if (evt === 'state') this.management.observeDrone(payload);
+      this._broadcast({ type: evt, data: payload });
+    });
 
     // —— 业务运营模块(AOP 空域 / ARP 航路 / 任务 / 审计,融合自 Codex)—— 
     this.operations = new Operations({
@@ -85,7 +93,8 @@ export class ApiServer {
     this.aop.aspect('ingest', {
       after: (ctx) => {
         const frame = ctx.args[0];
-        const droneId = `uav-${frame.sysid}`;
+        const droneId = ctx.result;
+        if (!droneId || !this.gateway.getState(droneId)) return;
         if ([1, 24, 30, 33, 147].includes(frame.msgid)) {
           const list = this.telemetryStore.get(droneId) || [];
           list.push({ msgid: frame.msgid, t: Date.now(), data: frame.decoded });
@@ -95,9 +104,9 @@ export class ApiServer {
       },
     });
 
-    this.http = createServer((req, res) => this._route(req, res));
+    this.http = createServer((req, res) => this._route(req, res).catch(()=>{if(!res.headersSent)res.writeHead(400,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify({error:'请求无效'}));}));
     this.wss = new WebSocketServer({ server: this.http, path: '/ws' });
-    this.wss.on('connection', (ws) => this._onWs(ws));
+    this.wss.on('connection', (ws, req) => this._onWs(ws, req));
   }
 
   // ————— REST 路由 —————
@@ -111,7 +120,7 @@ export class ApiServer {
     }
     // 静态资源
     let filePath = normalize(join(this.webRoot, path === '/' ? 'index.html' : path));
-    if (!filePath.startsWith(normalize(this.webRoot))) {
+    if (filePath !== normalize(this.webRoot) && !filePath.startsWith(normalize(this.webRoot).replace(/[\\/]+$/,'')+sep)) {
       res.writeHead(403); res.end('forbidden'); return;
     }
     if (!existsSync(filePath) || (await stat(filePath)).isDirectory()) {
@@ -132,10 +141,19 @@ export class ApiServer {
       res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(obj));
     };
-    // 鉴权:除 health 外都需要 X-API-Token
+    const principal = this._principal(req);
+    if (path.startsWith('/api/v2/')) return managementRoute(req, res, path, this.management, principal);
+    // All legacy routes and WebSocket feeds share the same organization scope.
     if (path !== '/api/health') {
-      const token = req.headers['x-api-token'];
-      if (token !== this.apiToken) return send(401, { error: 'AUTH_FAILED', hint: `需要 X-API-Token 头(默认 dsh-demo-token)` });
+      if (req.method !== 'GET' && !sameOrigin(req)) return send(403,{error:'跨站请求被拒绝'});
+      if (!principal) return send(401, { error: '请先登录' });
+      if (!principal.permissions.includes('view')) return send(403, { error: '没有查看权限' });
+      if (req.method !== 'GET' && !principal.permissions.includes('control')) return send(403, { error: '没有控制权限' });
+      const scopedId = /^\/api\/(?:drones|telemetry)\/([^/]+)/.exec(path)?.[1];
+      if (scopedId && !this.management.canSeeDrone(principal, scopedId)) return send(404, { error:'设备不在授权范围' });
+      if (scopedId && req.method !== 'GET' && !this.management.canControlDrone(principal, scopedId)) return send(403,{error:'协作授权仅允许查看该设备'});
+      if (principal.orgId !== 'hq' && !/^\/api\/(drones|telemetry)(\/|$)/.test(path)) return send(403,{error:'此接口仅对总站开放'});
+      if (req.method !== 'GET' && /^\/api\/drones\/real-[^/]+\//.test(path)) return send(409,{error:'当前 QGC 转发链路仅支持遥测，未发送飞行指令。'});
     }
 
     try {
@@ -147,6 +165,7 @@ export class ApiServer {
           listening: !!this.udpListening,
           port: this.udpPort ?? null,
           host: this._lanIp(),
+          positionMessages: this.gateway.positionDiagnostics,
         });
       }
       if (path === '/api/sim/add' && req.method === 'POST') {
@@ -168,8 +187,8 @@ export class ApiServer {
       }
       if (path === '/api/drones' && req.method === 'GET') {
         return send(200, {
-          drones: this.gateway.allStates(),
-          arp: this.arp.snapshot(),
+          drones: this.gateway.allStates().filter(d=>this.management.canSeeDrone(principal,d.droneId)),
+          arp: this.arp.snapshot().filter(d=>this.management.canSeeDrone(principal,d.droneId)),
           time: Date.now(),
         });
       }
@@ -181,7 +200,7 @@ export class ApiServer {
         return send(200, { droneId: m[1], state, arp: arpEntry ? { ...arpEntry } : null });
       }
       if (m && req.method === 'DELETE') {
-        return this._deleteDrone(m[1], send);
+        return this._deleteDrone(m[1], send, principal);
       }
       const cm = path.match(/^\/api\/drones\/([^/]+)\/command$/);
       if (cm && req.method === 'POST') {
@@ -288,12 +307,27 @@ export class ApiServer {
 
   // ————— WebSocket —————
 
-  _onWs(ws) {
-    ws.send(JSON.stringify({ type: 'snapshot', data: { drones: this.gateway.allStates(), arp: this.arp.snapshot(), time: Date.now() } }));
+  _principal(req) {
+    const user=this.management.session(sessionToken(req));
+    if(user)return user;
+    if(this.integrationToken && req.headers['x-api-token']===this.integrationToken) return {id:'integration',name:'服务接口',orgId:'hq',permissions:['view','control']};
+    return null;
+  }
+
+  _onWs(ws, req) {
+    if(!sameOrigin(req)){ws.close(1008,'跨站请求被拒绝');return;}
+    const user=this._principal(req);
+    if(!user?.permissions.includes('view')){ws.close(1008,'请先登录');return;}
+    ws.platformRequest=req;
+    ws.send(JSON.stringify({ type: 'snapshot', data: { drones: this.gateway.allStates().filter(d=>this.management.canSeeDrone(user,d.droneId)), arp: this.arp.snapshot().filter(d=>this.management.canSeeDrone(user,d.droneId)), time: Date.now() } }));
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg.type === 'command') {
+          const current=this._principal(ws.platformRequest);
+          if(!current?.permissions.includes('control')||!this.management.canControlDrone(current,msg.droneId)||String(msg.droneId).startsWith('real-')) {
+            ws.send(JSON.stringify({type:'command_result',data:{ok:false,droneId:msg.droneId,reason:'未授权或当前链路仅支持遥测'}}));return;
+          }
           const result = this.gateway.command(msg.droneId, msg.command);
           ws.send(JSON.stringify({ type: 'command_result', data: { ...result, droneId: msg.droneId } }));
         }
@@ -307,12 +341,16 @@ export class ApiServer {
   _broadcast(payload) {
     const text = JSON.stringify(payload);
     for (const client of this.wss.clients) {
+      const user=client.platformRequest&&this._principal(client.platformRequest);
+      if(!user?.permissions.includes('view')){client.close(1008,'会话已失效');continue;}
+      if(payload.data?.droneId&&!this.management.canSeeDrone(user,payload.data.droneId))continue;
+      if(!payload.data?.droneId&&user.orgId!=='hq')continue;
       if (client.readyState === 1) client.send(text);
     }
   }
 
   /** 删除一架无人机(停模拟器遥测 + 清网关状态 + 清 ARP + 清遥测缓存)。 */
-  async _deleteDrone(droneId, send) {
+  async _deleteDrone(droneId, send, principal) {
     const arpEntry = this.arp.entries.get(droneId);
     const state = this.gateway.getState(droneId);
     if (!arpEntry && !state) return send(404, { error: `unknown drone ${droneId}` });
@@ -328,6 +366,7 @@ export class ApiServer {
     const gwRemoved = this.gateway.removeDrone(droneId);
     this.telemetryStore.delete(droneId);
     this.operations?._touch?.('drone.remove', { droneId });
+    this.management.audit(principal,'drone.remove','telemetry',droneId);
     this.logger.info(`[DEL] 已删除无人机 ${droneId} (gw=${gwRemoved})`);
     return send(200, { ok: true, droneId, removed: gwRemoved });
   }
